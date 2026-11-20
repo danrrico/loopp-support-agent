@@ -21,6 +21,9 @@ import { tokenize } from "@/lib/rag/text";
 export interface Embedder {
   /** Embedding dimension (1536 for text-embedding-3-small and the mock). */
   readonly dims: number;
+  /** "mock" (keyword overlap) or "openai" (real embeddings). The eval
+   *  script refuses to set production thresholds from a mock embedder. */
+  readonly kind: "mock" | "openai";
   /** Embed a batch of texts. Returns one vector per input, same order. */
   embed(texts: string[]): Promise<number[][]>;
 }
@@ -37,6 +40,7 @@ export const EMBEDDING_DIMS = 1536;
  */
 export class MockEmbedder implements Embedder {
   readonly dims = EMBEDDING_DIMS;
+  readonly kind = "mock" as const;
 
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map((text) => embedText(text, this.dims));
