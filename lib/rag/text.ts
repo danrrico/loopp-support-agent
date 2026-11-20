@@ -24,7 +24,7 @@ const STOPWORDS = new Set([
   "some", "any", "all", "each", "per", "via",
   "much", "many", "get", "got", "make", "made", "take", "give",
   "given", "say", "said", "know", "need", "want", "like", "really",
-  "please", "thanks", "thank", "hi", "hello", "hey",
+  "please", "thanks", "thank", "hi", "hello", "hey", "help",
 ]);
 
 /**

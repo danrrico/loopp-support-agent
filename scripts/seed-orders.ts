@@ -10,22 +10,8 @@
  */
 
 import "dotenv/config";
-import fs from "node:fs";
-import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
-
-interface SeedOrder {
-  order_id: string;
-  email: string;
-  status: string;
-  items: Array<{ name: string; qty: number; price_cents: number }>;
-  total_cents: number;
-  refunded_cents: number;
-  daysAgo: number;
-  tracking_number: string | null;
-  carrier: string | null;
-  estimated_delivery: string | null;
-}
+import { loadMockOrders } from "@/lib/db/mock-orders";
 
 async function main(): Promise<void> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -42,21 +28,18 @@ async function main(): Promise<void> {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  const raw = JSON.parse(
-    fs.readFileSync(path.join(process.cwd(), "data", "mock-orders.json"), "utf-8"),
-  ) as { orders: SeedOrder[] };
-
-  const rows = raw.orders.map((o) => ({
+  const orders = loadMockOrders();
+  const rows = orders.map((o) => ({
     order_id: o.order_id,
     email: o.email,
     status: o.status,
     items: o.items,
     total_cents: o.total_cents,
     refunded_cents: o.refunded_cents,
-    placed_at: new Date(Date.now() - o.daysAgo * 24 * 60 * 60 * 1000).toISOString(),
-    tracking_number: o.tracking_number,
-    carrier: o.carrier,
-    estimated_delivery: o.estimated_delivery,
+    placed_at: o.placed_at,
+    tracking_number: o.tracking_number ?? null,
+    carrier: o.carrier ?? null,
+    estimated_delivery: o.estimated_delivery ?? null,
   }));
 
   const { error } = await supabase
