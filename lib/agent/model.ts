@@ -263,7 +263,18 @@ const SENSITIVE_PATTERNS: Array<{
 ];
 
 const HUMAN_PATTERNS = /\b(human|real person|agent|representative|talk to someone|someone real|escalate)\b/i;
-const REFUND_PATTERNS = /\b(refund|return|money back|give me my money)\b/i;
+// Refund = a REQUEST to return/refund, not a question about the policy.
+// "What is your return policy?" is a policy question; "I want to return
+// the jacket" is a refund. The real model makes the same distinction from
+// the route prompt; the mock mirrors it with request-language patterns.
+const REFUND_PATTERNS = [
+  /\b(i want|i'd like|i need|let me|please)\b.{0,30}\b(refund|return)\b/i,
+  /\breturn (the|my|this|that|an|a)\b/i,
+  /\brefund (my|the|this|for|me)\b/i,
+  /^\s*refund\b/i,
+  /\bmoney back\b/i,
+  /\bhow do i return\b/i,
+];
 const ORDER_PATTERNS = /\b(track|tracking|where is my order|order status|shipped|delivered|has my order|when will (it|my order) arrive)\b/i;
 const COMPLAINT_PATTERNS = /\b(angry|terrible|awful|worst|disappointed|unacceptable|ridiculous|furious)\b/i;
 const CHITCHAT_PATTERNS = /^(hi|hello|hey|thanks|thank you|bye|goodbye|good morning|good afternoon)\b/i;
@@ -296,7 +307,7 @@ export function mockRoute(message: string): RouteResult {
       standaloneQuery: text,
     };
   }
-  if (REFUND_PATTERNS.test(text)) {
+  if (REFUND_PATTERNS.some((p) => p.test(text))) {
     return {
       intent: "refund",
       sensitive: false,
@@ -476,13 +487,18 @@ export class MockChatModel implements ChatModel {
     const toolResults = (ctx.toolResults as Array<Record<string, unknown>>) ?? [];
     const intent = ctx.intent as Intent | undefined;
 
+    // Tool-result-driven answers come first (any intent) — the draft
+    // reports what the tools found, not what the chunks say.
+    const refundResult = toolResults.find((r) => r.tool === "initiateRefund");
+    const lookupResult = toolResults.find((r) => r.tool === "orderLookup");
+
     // Refund executed → success message. Numbers come from the tool result
-    // (allowed by the number assert); timing comes from the billing chunk.
-    const refundResult = toolResults.find(
-      (r) => r.tool === "initiateRefund" && r.status === "initiated",
-    );
-    if (refundResult) {
-      const amount = formatCents(Number(refundResult.amountCents ?? 0));
+    // (display fields, verbatim — the number assert allows them).
+    if (refundResult?.status === "initiated") {
+      const amount =
+        typeof refundResult.amountDisplay === "string"
+          ? refundResult.amountDisplay
+          : formatCents(Number(refundResult.amountCents ?? 0));
       const refundId = String(refundResult.refundId ?? "");
       const timingChunk = chunks.find((c) =>
         c.content.includes("3 to 5 business days"),
@@ -509,26 +525,68 @@ export class MockChatModel implements ChatModel {
       };
     }
 
-    // Order lookup result → status answer. Numbers come from the tool result.
-    const lookupResult = toolResults.find((r) => r.tool === "orderLookup");
+    // Refund not eligible → report the reason (from the tool, in code).
+    if (refundResult?.error === "REFUND_NOT_ELIGIBLE") {
+      return {
+        content: JSON.stringify({
+          answerText: `${String(refundResult.reason ?? "This order isn't eligible for a refund.")} If you'd like, I can connect you with a human agent to review your case.`,
+          claims: [],
+        }),
+        toolCalls: [],
+        model: this.name,
+      };
+    }
+
+    // Order not found (any intent) → ask the user to check the number.
+    // The message names the order ID the user gave (from the tool result),
+    // NOT an example ID — an example's digits would fail the number assert.
+    if (lookupResult?.error === "ORDER_NOT_FOUND") {
+      const queriedId =
+        typeof lookupResult.orderId === "string"
+          ? ` ${lookupResult.orderId}`
+          : "";
+      return {
+        content: JSON.stringify({
+          answerText: `I couldn't find an order with the number${queriedId}. Could you double-check the order number and try again?`,
+          claims: [],
+        }),
+        toolCalls: [],
+        model: this.name,
+      };
+    }
+
+    // Email lookup with several orders — ask the user to disambiguate
+    // (bounded list, never auto-picks).
+    if (lookupResult && Array.isArray(lookupResult.orders)) {
+      const orders = lookupResult.orders as Array<{
+        orderId?: string;
+        status?: string;
+        totalDisplay?: string;
+      }>;
+      const list = orders
+        .map((o) => `${o.orderId} (${o.status}, ${o.totalDisplay ?? ""})`.trim())
+        .join("; ");
+      return {
+        content: JSON.stringify({
+          answerText: `I found ${orders.length} orders for that email: ${list}. Which one would you like to check?`,
+          claims: [],
+        }),
+        toolCalls: [],
+        model: this.name,
+      };
+    }
+
+    // Single-order status answer.
     if (lookupResult && intent === "order_status") {
-      if (lookupResult.error === "ORDER_NOT_FOUND") {
-        return {
-          content: JSON.stringify({
-            answerText:
-              "I couldn't find an order with that number. Could you double-check the order number? It looks like NW-88412.",
-            claims: [],
-          }),
-          toolCalls: [],
-          model: this.name,
-        };
-      }
       const items = Array.isArray(lookupResult.items)
         ? (lookupResult.items as Array<{ name?: string; qty?: number }>)
             .map((i) => `${i.name ?? "item"} (×${i.qty ?? 1})`)
             .join(", ")
         : "";
-      const total = formatCents(Number(lookupResult.totalCents ?? 0));
+      const total =
+        typeof lookupResult.totalDisplay === "string"
+          ? lookupResult.totalDisplay
+          : formatCents(Number(lookupResult.totalCents ?? 0));
       return {
         content: JSON.stringify({
           answerText: `Order ${lookupResult.orderId} is ${lookupResult.status}. It contains ${items}, total ${total}.`,

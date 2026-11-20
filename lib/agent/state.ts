@@ -130,6 +130,18 @@ export const AgentStateAnnotation = Annotation.Root({
     reducer: (_a, b) => b,
     default: () => null,
   }),
+  /** Refund confirmation detected in this turn's message (deterministic, not a model decision). */
+  refundConfirmation: Annotation<"confirmed" | "denied" | null>({
+    reducer: (_a, b) => b,
+    default: () => null,
+  }),
+  /** Tool calls the plan node decided on, awaiting execution by tools_loop. */
+  pendingToolCalls: Annotation<
+    Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+  >({
+    reducer: (_a, b) => b,
+    default: () => [],
+  }),
   escalation: Annotation<{ rule: EscalationRule; ticketId?: string } | null>({
     reducer: (_a, b) => b,
     default: () => null,

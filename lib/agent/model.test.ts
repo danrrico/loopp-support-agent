@@ -10,6 +10,13 @@ describe("mockRoute — deterministic intent classification", () => {
   it("refund intent", () => {
     expect(mockRoute("I want to return the jacket and get my money back").intent).toBe("refund");
     expect(mockRoute("Can I get a refund for order NW-88412?").intent).toBe("refund");
+    expect(mockRoute("Refund order NW-88412 please").intent).toBe("refund");
+  });
+
+  it("a question ABOUT the return policy is policy_question, not refund", () => {
+    expect(mockRoute("What is your return policy?").intent).toBe("policy_question");
+    expect(mockRoute("What is the return window?").intent).toBe("policy_question");
+    expect(mockRoute("Can I return shoes?").intent).toBe("policy_question");
   });
 
   it("order_status intent", () => {

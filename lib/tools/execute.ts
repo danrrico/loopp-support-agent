@@ -224,6 +224,7 @@ export async function executeOrderLookup(
           orderId: o.orderId,
           status: o.status,
           totalCents: o.totalCents,
+          totalDisplay: formatCents(o.totalCents),
           placedAt: o.placedAt,
           itemSummary: o.items.map((i) => `${i.name} (×${i.qty})`).join(", "),
         })),

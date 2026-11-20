@@ -26,6 +26,15 @@ export interface SearchableChunk {
   policySlug: string;
   section: string;
   content: string;
+  /**
+   * Extra text indexed for matching but NOT part of the chunk content
+   * (policy title words + section heading). Users say "return policy" —
+   * the word "policy" lives in the H1 title, which chunking drops from
+   * content, so without this the query word is unknown to the index and
+   * drags the score below the floor. Drafts and verifier quotes still use
+   * `content` only.
+   */
+  indexText?: string;
 }
 
 export interface ScoredHit extends SearchableChunk {
@@ -40,8 +49,10 @@ export class LocalSearch {
 
   constructor(private readonly chunks: SearchableChunk[]) {
     this.numDocs = chunks.length;
+    const indexable = (chunk: SearchableChunk): string =>
+      chunk.indexText ? `${chunk.content} ${chunk.indexText}` : chunk.content;
     this.chunkTokens = chunks.map((chunk) => {
-      const tokens = new Set(tokenize(chunk.content));
+      const tokens = new Set(tokenize(indexable(chunk)));
       for (const token of tokens) {
         this.docFreq.set(token, (this.docFreq.get(token) ?? 0) + 1);
       }
@@ -49,7 +60,7 @@ export class LocalSearch {
     });
     this.chunkCounts = chunks.map((chunk) => {
       const counts = new Map<string, number>();
-      for (const token of tokenize(chunk.content)) {
+      for (const token of tokenize(indexable(chunk))) {
         counts.set(token, (counts.get(token) ?? 0) + 1);
       }
       return counts;

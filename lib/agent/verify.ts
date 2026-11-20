@@ -131,7 +131,10 @@ export function verifyDraft(
     }
   }
 
-  // 2. Number assert — allowed numbers = chunks ∪ successful tool results.
+  // 2. Number assert — allowed numbers = chunks ∪ ok/business tool results.
+  // Business outcomes are valid executions with real server-computed data
+  // (e.g. the order ID the user gave in an ORDER_NOT_FOUND result) — they
+  // count. Only "system" outcomes are excluded (no trustworthy data).
   const allowed = new Set<string>();
   for (const chunk of chunks) {
     for (const n of extractNumbers(chunk.content)) {
@@ -139,7 +142,7 @@ export function verifyDraft(
     }
   }
   for (const tc of toolCalls) {
-    if (tc.outcome !== "ok") continue;
+    if (tc.outcome === "system") continue;
     for (const n of extractNumbers(tc.resultText)) {
       allowed.add(normalizeNumber(n));
     }

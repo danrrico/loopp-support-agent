@@ -123,6 +123,8 @@ export async function getLocalSearch(): Promise<LocalSearch> {
         policySlug: slug,
         section: chunk.section,
         content: chunk.content,
+        // Policy title words + section heading, indexed for matching only.
+        indexText: `${slug} policy ${chunk.section}`,
       });
     }
   }
