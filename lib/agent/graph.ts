@@ -768,6 +768,33 @@ async function generateDraft(
   // tests assert), with the timing claim grounded in the retrieved chunk
   // when it is present.
   if (state.intent === "refund") {
+    // Business outcome — refund not eligible (already refunded, outside
+    // the window, not delivered). Same problem as the executed case: the
+    // model draft invents a quote that is not in any retrieved chunk, so
+    // Stage-2 verification fails (stage2_fail → escalation). Build it in
+    // code from the tool result's reason; no claims, so nothing to verify
+    // against a chunk.
+    const notEligible = [...state.toolCalls]
+      .reverse()
+      .find(
+        (t) =>
+          t.tool === "initiateRefund" &&
+          t.outcome === "business" &&
+          t.errorCode === "REFUND_NOT_ELIGIBLE",
+      );
+    const neResult = notEligible?.result as
+      | { orderId?: string; reason?: string }
+      | undefined;
+    if (neResult?.orderId && neResult?.reason) {
+      const already = /already been fully refunded/i.test(neResult.reason);
+      const answerText = already
+        ? `Order ${neResult.orderId} has already been fully refunded — there's nothing left to refund for it.`
+        : `Order ${neResult.orderId} can't be refunded. ${neResult.reason}`;
+      trace.emit("checking_policy", {
+        note: "Refund-not-eligible answer built deterministically from the tool result; running verification before anything streams.",
+      });
+      return { draft: { answerText, claims: [] } };
+    }
     const executed = [...state.toolCalls]
       .reverse()
       .find(
