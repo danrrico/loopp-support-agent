@@ -24,7 +24,12 @@
  *    correspond to a record in the turn's toolCalls[]. A claimed action
  *    with no tool record fails. Claims with NO corresponding tool (e.g. a
  *    return label — no such tool exists) always fail, which makes them
- *    structurally impossible, not just editorially forbidden.
+ *    structurally impossible, not just editorially forbidden. EXCEPTION: a
+ *    matched phrase that appears verbatim in a retrieved chunk is a
+ *    restatement of policy, not a claim of action — "Refunds are issued
+ *    within 3 to 5 business days" is in the Refund Timing chunk, so a
+ *    draft repeating it must not fail. Only pairings the evidence never
+ *    makes ("I've initiated your refund") are flagged.
  */
 
 import type { RetrievalHit } from "@/lib/rag/retrieve";
@@ -161,8 +166,25 @@ export function verifyDraft(
     toolCalls.filter((tc) => tc.outcome === "ok").map((tc) => tc.tool),
   );
   for (const { pattern, tool, label } of ACTION_CLAIMS) {
-    if (!pattern.test(draft.answerText)) continue;
-    if (tool === null || !successfulTools.has(tool)) {
+    // Check every match, not just the first: a policy restatement early in
+    // the answer must not mask a genuine action claim later in it.
+    const globalPattern = new RegExp(pattern.source, "gi");
+    let flagged = false;
+    for (const m of draft.answerText.matchAll(globalPattern)) {
+      // Verbatim in a retrieved chunk → restatement of policy, not an
+      // action claim. (normalize = lowercase + collapse whitespace, same
+      // as the quote-substring assert.)
+      const matchedText = normalize(m[0]);
+      const restatesPolicy = chunks.some((c) =>
+        normalize(c.content).includes(matchedText),
+      );
+      if (restatesPolicy) continue;
+      if (tool === null || !successfulTools.has(tool)) {
+        flagged = true;
+        break;
+      }
+    }
+    if (flagged) {
       failedAsserts.push(
         `action_claim: answer claims "${label}" but no matching tool call executed`,
       );

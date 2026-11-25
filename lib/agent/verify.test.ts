@@ -225,6 +225,55 @@ describe("verifyDraft — action-claim assert", () => {
     );
   });
 
+  it("a policy restatement ('Refunds are issued...') does NOT fail with no tool call", () => {
+    // Nov 25 live: the draft faithfully repeated the Refund Timing chunk
+    // ("Approved refunds are issued to your original payment method
+    // within 3 to 5 business days") and the action-claim assert flagged
+    // it — the policy sentence itself matches the refund+issued pattern.
+    // A matched phrase that appears verbatim in a retrieved chunk is a
+    // restatement of policy, not a claim that an action was taken.
+    const r = verifyDraft(
+      {
+        answerText:
+          "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method. Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+        claims: [
+          {
+            text: "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method.",
+            chunkId: "local:returns:0",
+            quote:
+              "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method.",
+          },
+          {
+            text: "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+            chunkId: "local:billing:1",
+            quote:
+              "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+          },
+        ],
+      },
+      CHUNKS,
+      [],
+    );
+    expect(r.failedAsserts).toEqual([]);
+    expect(r.passed).toBe(true);
+  });
+
+  it("a policy restatement does not mask a genuine action claim later in the answer", () => {
+    const r = verifyDraft(
+      {
+        answerText:
+          "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection. I've initiated your refund for $129.00.",
+        claims: [],
+      },
+      CHUNKS,
+      [],
+    );
+    expect(r.passed).toBe(false);
+    expect(r.failedAsserts.some((a) => a.startsWith("action_claim"))).toBe(
+      true,
+    );
+  });
+
   it("a return-label claim ALWAYS fails — no such tool exists", () => {
     const r = verifyDraft(
       {
