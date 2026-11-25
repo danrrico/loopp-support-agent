@@ -49,6 +49,27 @@ export interface RealtimeVoiceClient {
   disconnect(reason?: "ended" | "idle" | "cap"): void;
 }
 
+/**
+ * Build the `response.create` client event for speaking graph output.
+ *
+ * GA Realtime API (gpt-realtime-2.1, verified live 2026-11-25): the
+ * Response object has NO `modalities` field — sending it fails with
+ * `unknown_parameter: 'response.modalities'`. Modalities are a
+ * session-level concept; the minted session already defaults to
+ * `output_modalities: ["audio"]` (see session.created), so audio output
+ * needs nothing per response. `instructions` alone is the valid payload.
+ */
+export function buildResponseCreatePayload(
+  text: string,
+): Record<string, unknown> {
+  return {
+    type: "response.create",
+    response: {
+      instructions: `${VOICE_CONFIG.speakInstructions}\n\n${text}`,
+    },
+  };
+}
+
 export interface ConnectOptions {
   ephemeralKey: string;
   model: string;
@@ -80,6 +101,11 @@ export async function connectRealtimeVoice(
 
   const pc = new RTCPeerConnection();
   let closed = false;
+  // True only between a server-confirmed response.created and its
+  // response.done / response.cancelled. cancelResponse() no-ops while
+  // false, so a cancel after a failed create (or a finished response)
+  // never reaches the server — no "no active response" error.
+  let responseActive = false;
   let lastActivityAt = Date.now();
   const connectedAt = Date.now();
 
@@ -159,6 +185,7 @@ export async function connectRealtimeVoice(
         break;
       }
       case "response.audio_transcript.delta":
+      case "response.output_audio_transcript.delta":
         markActivity();
         onEvent({
           type: "agent-transcript-partial",
@@ -166,6 +193,7 @@ export async function connectRealtimeVoice(
         });
         break;
       case "response.audio_transcript.done":
+      case "response.output_audio_transcript.done":
         markActivity();
         onEvent({
           type: "agent-transcript-final",
@@ -174,19 +202,27 @@ export async function connectRealtimeVoice(
         break;
       case "response.created":
         markActivity();
+        responseActive = true;
         onEvent({ type: "response-started" });
         break;
       case "response.done":
+        responseActive = false;
+        markActivity();
+        onEvent({ type: "response-done" });
+        break;
       case "response.cancelled":
+        responseActive = false;
         markActivity();
         onEvent({ type: "response-done" });
         break;
       case "error": {
         const err = event.error as Record<string, unknown> | undefined;
-        onEvent({
-          type: "error",
-          message: String(err?.message ?? "Realtime error"),
-        });
+        const message = String(err?.message ?? "Realtime error");
+        // Benign race: a cancel sent after the response already finished
+        // (or after a failed create) has no active response to cancel.
+        // Never surface that as a user-facing error banner.
+        if (/no active response/i.test(message)) return;
+        onEvent({ type: "error", message });
         break;
       }
       default:
@@ -246,18 +282,15 @@ export async function connectRealtimeVoice(
     speak(text: string) {
       if (closed || dc.readyState !== "open") return;
       markActivity();
-      dc.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio"],
-            instructions: `${VOICE_CONFIG.speakInstructions}\n\n${text}`,
-          },
-        }),
-      );
+      dc.send(JSON.stringify(buildResponseCreatePayload(text)));
     },
     cancelResponse() {
-      if (closed || dc.readyState !== "open") return;
+      // No active response (failed create, already finished, or never
+      // started) — silently ignore. Sending response.cancel then would
+      // make the server answer "no active response", which used to
+      // surface as a red error banner for a non-error.
+      if (closed || dc.readyState !== "open" || !responseActive) return;
+      responseActive = false;
       dc.send(JSON.stringify({ type: "response.cancel" }));
     },
     disconnect(reason: "ended" | "idle" | "cap" = "ended") {
