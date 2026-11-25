@@ -9,6 +9,7 @@ const RETURNS_CHUNK: RetrievalHit = {
   content:
     "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method.",
   similarity: 0.9,
+  source: "local:policy_corpus",
 };
 
 const BILLING_CHUNK: RetrievalHit = {
@@ -18,6 +19,7 @@ const BILLING_CHUNK: RetrievalHit = {
   content:
     "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
   similarity: 0.8,
+  source: "local:policy_corpus",
 };
 
 const CHUNKS = [RETURNS_CHUNK, BILLING_CHUNK];

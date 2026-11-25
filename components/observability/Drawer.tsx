@@ -79,7 +79,22 @@ function TurnDetail({ trace }: { trace: TraceEvent[] }) {
     policySlug: string;
     section: string;
     similarity: number;
+    source?: string;
   }>) ?? [];
+
+  // Which corpus answered this query — Supabase policy_chunks in
+  // production, the local corpus in demo mode. Named on the retrieval
+  // event by the server so RAG-on-Supabase is provable from the drawer.
+  const retrievalSource =
+    typeof retrieval?.payload.source === "string"
+      ? retrieval.payload.source
+      : hits[0]?.source ?? "unknown";
+  const retrievalSourceLabel =
+    retrievalSource === "supabase:policy_chunks"
+      ? "Supabase · policy_chunks"
+      : retrievalSource === "local:policy_corpus"
+        ? "Local corpus"
+        : retrievalSource;
 
   return (
     <div className="space-y-3">
@@ -105,7 +120,9 @@ function TurnDetail({ trace }: { trace: TraceEvent[] }) {
       )}
 
       {retrieval && (
-        <Section title={`Retrieval (${hits.length} chunks survived the floor)`}>
+        <Section
+          title={`Retrieval · ${retrievalSourceLabel} (${hits.length} chunks survived the floor)`}
+        >
           {hits.length === 0 ? (
             <p className="text-zinc-500 dark:text-zinc-400">
               Zero surviving chunks — the pre-gate escalates policy intents.

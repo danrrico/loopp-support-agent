@@ -402,7 +402,7 @@ export async function executeSearchKnowledgeBase(
   const args: SearchKnowledgeBaseArgs = parsed.data;
   try {
     // Same retrieve() as the graph — same scores, same floor (§5.2).
-    const hits = await retrieve(args.query, { topK: args.topK });
+    const { hits } = await retrieve(args.query, { topK: args.topK });
     return {
       outcome: "ok",
       data: {
@@ -411,6 +411,7 @@ export async function executeSearchKnowledgeBase(
           excerpt: h.content.slice(0, 300),
           policySlug: h.policySlug,
           score: h.similarity,
+          source: h.source,
         })),
       },
     };

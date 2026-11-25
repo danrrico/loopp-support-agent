@@ -51,7 +51,7 @@ import {
   TOOL_MAX_ITERATIONS,
 } from "@/lib/agent/thresholds";
 import { verifyDraft, type Draft, type ToolCallForVerify } from "@/lib/agent/verify";
-import { retrieve } from "@/lib/rag/retrieve";
+import { retrieve, getRetrievalSource } from "@/lib/rag/retrieve";
 import { MODEL_TOOLS, executeTool } from "@/lib/tools/execute";
 import { formatCents } from "@/lib/money";
 
@@ -299,14 +299,16 @@ async function retrievePolicies(
   const { trace } = cfg(config);
   const query = state.standaloneQuery ?? state.userMessage;
   try {
-    const hits = await retrieve(query);
+    const { hits, source } = await retrieve(query);
     trace.emit("retrieval", {
       query,
+      source,
       hits: hits.map((h) => ({
         chunkId: h.chunkId,
         policySlug: h.policySlug,
         section: h.section,
         similarity: h.similarity,
+        source: h.source,
       })),
     });
     return { retrievedChunks: hits };
@@ -314,7 +316,12 @@ async function retrievePolicies(
     // Retrieval failure → zero evidence → the pre-gate escalates honestly
     // rather than the turn crashing.
     console.error("[graph] retrieval failed:", err);
-    trace.emit("retrieval", { query, hits: [], error: "retrieval failed" });
+    trace.emit("retrieval", {
+      query,
+      source: getRetrievalSource(),
+      hits: [],
+      error: "retrieval failed",
+    });
     return { retrievedChunks: [] };
   }
 }

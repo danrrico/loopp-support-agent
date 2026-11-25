@@ -98,7 +98,7 @@ async function main(): Promise<void> {
 
   const rows: EvalRow[] = [];
   for (const q of questions) {
-    const hits = await retrieve(q.question);
+    const { hits } = await retrieve(q.question);
     const top = hits[0] ?? null;
     const correct =
       q.expectedSlug === null

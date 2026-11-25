@@ -9,6 +9,7 @@ function hit(similarity: number, policySlug = "returns"): RetrievalHit {
     section: "Test",
     content: "Test content.",
     similarity,
+    source: "local:policy_corpus",
   };
 }
 
