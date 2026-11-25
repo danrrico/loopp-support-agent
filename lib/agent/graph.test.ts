@@ -278,6 +278,43 @@ describe("graph — order status", () => {
     expect(state.toolIterations).toBe(1);
   });
 
+  it("order-status answer is built deterministically from the tool result — the draft model is never consulted", async () => {
+    // The real model invents chunkIds for the claims when there are no
+    // retrieved chunks (observed live: claims citing chunk "order_status"),
+    // which the verifier rejects and the turn escalates (stage2_fail). A
+    // code-built draft from the tool result cannot hallucinate a citation,
+    // so the verified answer streams even if the draft model fails.
+    const mock = new MockChatModel();
+    const brokenDraftModel: ChatModel = {
+      name: "broken-draft-mock",
+      async generate(opts) {
+        if (opts.task === "draft") {
+          throw new Error("draft model unavailable");
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: brokenDraftModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order NW-88412?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/NW-88412 is delivered/);
+    expect(state.finalAnswer).toMatch(/Trailhead Jacket/);
+    expect(state.finalAnswer).toMatch(/\$129\.00/);
+    expect(state.verifierResult?.passed).toBe(true);
+    expect(state.escalation).toBeNull();
+  });
+
   it("a bare order ID without the hyphen (NW88412) is normalized and answered, not escalated", async () => {
     // The spoken form "NW eight eight four one two" reaches the tool as
     // NW88412; without normalization the zod validation fails twice for

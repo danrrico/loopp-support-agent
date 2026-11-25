@@ -648,6 +648,50 @@ async function generateDraft(
   config: RunnableConfig,
 ): Promise<Partial<AgentState>> {
   const { model, trace } = cfg(config);
+
+  // Order status with a successful single-order lookup: the answer is
+  // fully determined by the tool result, so build it in code (same wording
+  // as the mock model) instead of asking the model to draft it. The real
+  // model invents chunkIds for the claims when there are no retrieved
+  // chunks (observed live: claims citing chunk "order_status"), which the
+  // verifier rightly rejects — and the turn escalates (stage2_fail). A
+  // code-built draft still flows through verify_claims below, so the
+  // verified-answer guarantee holds; it just cannot hallucinate a
+  // citation. Numbers come from the tool result, which the number assert
+  // allows. Business outcomes (ORDER_NOT_FOUND) and email multi-order
+  // lookups still go through the model draft, as before.
+  if (state.intent === "order_status") {
+    const lookup = [...state.toolCalls]
+      .reverse()
+      .find((t) => t.tool === "orderLookup" && t.outcome === "ok");
+    const result = lookup?.result as
+      | {
+          orderId?: string;
+          status?: string;
+          items?: Array<{ name?: string; qty?: number }>;
+          totalDisplay?: string;
+          totalCents?: number;
+          orders?: unknown;
+        }
+      | undefined;
+    if (result?.orderId && result.status && !Array.isArray(result.orders)) {
+      const items = Array.isArray(result.items)
+        ? result.items
+            .map((i) => `${i.name ?? "item"} (×${i.qty ?? 1})`)
+            .join(", ")
+        : "";
+      const total =
+        typeof result.totalDisplay === "string"
+          ? result.totalDisplay
+          : formatCents(Number(result.totalCents ?? 0));
+      const answerText = `Order ${result.orderId} is ${result.status}. It contains ${items}, total ${total}.`;
+      trace.emit("checking_policy", {
+        note: "Order-status answer built deterministically from the tool result; running verification before anything streams.",
+      });
+      return { draft: { answerText, claims: [] } };
+    }
+  }
+
   const system = buildDraftSystem({
     intent: (state.intent ?? "policy_question") as Intent,
     chunks: state.retrievedChunks,
