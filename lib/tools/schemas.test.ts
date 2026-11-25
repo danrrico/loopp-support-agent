@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractOrderId,
   initiateRefundSchema,
   orderLookupSchema,
 } from "@/lib/tools/schemas";
+
+describe("extractOrderId — free-text order ID extraction", () => {
+  it.each([
+    ["Where is my order NW-88412?", "NW-88412"],
+    ["Where is my order NW88412?", "NW-88412"],
+    ["Where is my order NW 88412?", "NW-88412"],
+    ["Where is my order, NW eight eight four one two?", "NW-88412"],
+    ["track nw eight eight four one two please", "NW-88412"],
+    ["refund order NW-88412 please", "NW-88412"],
+  ])("extracts %s → %s", (text, expected) => {
+    expect(extractOrderId(text)).toBe(expected);
+  });
+
+  it.each([
+    "Where is my order?",
+    "What is your return policy?",
+    "NW-884", // too short
+    "NW eight eight four", // only 3 spoken digits
+  ])("returns null for %s", (text) => {
+    expect(extractOrderId(text)).toBeNull();
+  });
+});
 
 describe("orderLookupSchema — order ID normalization", () => {
   it.each(["NW-88412", "NW88412", "NW 88412", "nw-88412", "  NW-88412  "])(

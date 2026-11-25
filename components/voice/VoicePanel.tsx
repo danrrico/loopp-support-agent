@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { mintVoiceSession, postVoiceTranscript } from "@/lib/client/api";
 import { Waveform } from "@/components/voice/Waveform";
-import { VOICE_CONFIG } from "@/lib/voice/config";
+import { pickFiller, VOICE_CONFIG } from "@/lib/voice/config";
 import {
   connectRealtimeVoice,
   type RealtimeClientEvent,
@@ -73,7 +73,25 @@ interface TranscriptLine {
   final: boolean;
 }
 
-export function VoicePanel({ onClose }: { onClose: () => void }) {
+export function VoicePanel({
+  onClose,
+  onVoiceTurn,
+}: {
+  onClose: () => void;
+  /**
+   * Fires when a voice turn completes (graph answer received). The chat
+   * page appends the turn's trace to the Observability drawer and its
+   * messages to the list — without this, voice turns are invisible in
+   * the drawer (observed live: 5 voice turns, drawer read "0 turns").
+   */
+  onVoiceTurn?: (turn: {
+    turnNumber: number;
+    trace: import("@/lib/client/types").TraceEvent[];
+    userText: string;
+    assistantText: string;
+    terminalState: string;
+  }) => void;
+}) {
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,14 +156,29 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         pushLine({ role: "user", text: event.text, final: true });
         setState("awaiting_graph");
         const myTurn = ++turnRef.current;
-        // Filler covers the graph round-trip; cancelled when the answer lands.
-        client?.speak(VOICE_CONFIG.fillerText);
+        // Contextual filler covers the graph round-trip; cancelled when
+        // the answer lands. Varied per topic (never the same phrase
+        // 5 times in a row).
+        client?.speak(pickFiller(event.text));
         void postVoiceTranscript(event.text, event.itemId)
           .then((result) => {
             // Stale turn: the user already spoke again — do not speak
             // this answer over the new utterance.
             if (!mountedRef.current || turnRef.current !== myTurn) return;
             client?.cancelResponse();
+            // Report the completed voice turn to the chat page so the
+            // Observability drawer + message list show it (voice turns
+            // otherwise never appear there). Skip duplicates — a retried
+            // POST replays a stored result, not a new turn.
+            if (!result.duplicate && result.speakableText.trim()) {
+              onVoiceTurn?.({
+                turnNumber: result.turnNumber,
+                trace: result.trace,
+                userText: event.text,
+                assistantText: result.speakableText,
+                terminalState: result.terminalState,
+              });
+            }
             if (result.speakableText.trim()) {
               client?.speak(result.speakableText);
               setState("speaking");

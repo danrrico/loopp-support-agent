@@ -187,6 +187,47 @@ export default function ChatPage() {
     }
   }
 
+  // A completed voice turn reports here so its trace lands in the
+  // Observability drawer and its messages in the list. Before this,
+  // voice turns were saved server-side but never shown in the drawer
+  // (live: 5 voice turns, drawer read "0 turns · 0 tool calls").
+  function handleVoiceTurn(turn: {
+    turnNumber: number;
+    trace: TraceEvent[];
+    userText: string;
+    assistantText: string;
+    terminalState: string;
+  }) {
+    setTraces((prev) => {
+      if (prev.some((t) => t.turnNumber === turn.turnNumber)) return prev;
+      return [
+        ...prev,
+        { turnNumber: turn.turnNumber, trace: turn.trace, partial: false },
+      ];
+    });
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `voice-user-${turn.turnNumber}`,
+        role: "user",
+        content: turn.userText,
+        modality: "voice",
+        possiblyTruncated: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: `voice-assistant-${turn.turnNumber}`,
+        role: "assistant",
+        content: turn.assistantText,
+        modality: "voice",
+        possiblyTruncated: false,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    setTurnCount((prev) => Math.max(prev, turn.turnNumber));
+    if (turn.terminalState === "escalated") setEscalated(true);
+  }
+
   return (
     <div className="flex min-h-screen flex-col">
       <header className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -230,7 +271,12 @@ export default function ChatPage() {
 
       <div className="flex flex-1">
         <main className="flex min-h-0 flex-1 flex-col">
-          {voiceOpen && <VoicePanel onClose={() => setVoiceOpen(false)} />}
+          {voiceOpen && (
+            <VoicePanel
+              onClose={() => setVoiceOpen(false)}
+              onVoiceTurn={handleVoiceTurn}
+            />
+          )}
 
           {error && (
             <div className="mx-4 mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 sm:mx-8 dark:bg-red-950 dark:text-red-300">

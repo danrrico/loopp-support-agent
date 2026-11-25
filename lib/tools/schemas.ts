@@ -16,6 +16,46 @@ import { z } from "zod";
 
 const ORDER_ID_RE = /^NW-\d{5}$/i;
 
+const DIGIT_WORDS: Record<string, string> = {
+  ZERO: "0",
+  OH: "0",
+  ONE: "1",
+  TWO: "2",
+  THREE: "3",
+  FOUR: "4",
+  FIVE: "5",
+  SIX: "6",
+  SEVEN: "7",
+  EIGHT: "8",
+  NINE: "9",
+};
+
+/**
+ * Extract a canonical NW-##### order ID from free text, handling the
+ * hyphenated ("NW-88412"), bare ("NW88412"), spaced ("NW 88412"), and
+ * spoken-digit-word ("NW eight eight four one two") forms. Returns null
+ * when no 5-digit NW ID is present. Used by the graph to force an
+ * orderLookup deterministically — the model must never be able to
+ * deflect an order-status question with "I don't have access" when the
+ * customer already gave the ID.
+ */
+export function extractOrderId(text: string): string | null {
+  const upper = text.toUpperCase();
+  // Digit forms: NW-88412, NW88412, NW 88412
+  const digitMatch = upper.match(/\bNW[-\s]?(\d{5})\b/);
+  if (digitMatch) return `NW-${digitMatch[1]}`;
+  // Spoken digit words: "NW eight eight four one two"
+  const words = upper.split(/[^A-Z0-9]+/).filter(Boolean);
+  const nwIdx = words.indexOf("NW");
+  if (nwIdx >= 0) {
+    const next = words.slice(nwIdx + 1, nwIdx + 6);
+    if (next.length === 5 && next.every((w) => w in DIGIT_WORDS)) {
+      return `NW-${next.map((w) => DIGIT_WORDS[w]).join("")}`;
+    }
+  }
+  return null;
+}
+
 /**
  * Normalize an order ID: trim, uppercase, strip internal spaces, and insert
  * the hyphen when the model passes the bare form ("NW88412" / "NW 88412" —

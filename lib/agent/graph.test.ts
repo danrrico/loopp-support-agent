@@ -357,6 +357,117 @@ describe("graph — order status", () => {
     expect(state.escalation).toBeNull();
     expect(state.verifierResult?.passed).toBe(true);
   });
+
+  it("a plan-step 'no access' deflection for order_status never reaches the user", async () => {
+    // Regression (Loom): gpt-4o-mini returned plain text "I don't have
+    // access to live order systems…" instead of calling orderLookup, and
+    // that deflection reached the user — then the correct answer followed
+    // in a second message. The lookup is now forced in code when the ID
+    // is in the message, so the deflection cannot surface.
+    const mock = new MockChatModel();
+    const deflectingModel: ChatModel = {
+      name: "deflecting-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          return {
+            content:
+              "I don't have access to live order systems to locate order NW-88412. Check your shipping confirmation email for a tracking link, or sign in to your account.",
+            toolCalls: [],
+            model: "deflecting-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: deflectingModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order NW-88412?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/NW-88412 is delivered/);
+    expect(state.finalAnswer).toMatch(/Trailhead Jacket/);
+    expect(state.finalAnswer).toMatch(/\$129\.00/);
+    expect(state.finalAnswer).not.toMatch(/don't have access/);
+    expect(state.escalation).toBeNull();
+  });
+
+  it("spoken digit words ('NW eight eight four one two') are looked up, not deflected", async () => {
+    const mock = new MockChatModel();
+    const deflectingModel: ChatModel = {
+      name: "deflecting-spoken-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          return {
+            content:
+              "I don't have access to live order systems to locate that order.",
+            toolCalls: [],
+            model: "deflecting-spoken-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: deflectingModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order, NW eight eight four one two?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/NW-88412 is delivered/);
+    expect(state.finalAnswer).not.toMatch(/don't have access/);
+    expect(state.escalation).toBeNull();
+  });
+
+  it("an order question with no ID gets a fixed question, never a model deflection", async () => {
+    const mock = new MockChatModel();
+    const deflectingModel: ChatModel = {
+      name: "deflecting-no-id-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          return {
+            content:
+              "I don't have access to live order systems. Please check your email.",
+            toolCalls: [],
+            model: "deflecting-no-id-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: deflectingModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("awaiting_user");
+    expect(state.finalAnswer).toMatch(/order number/);
+    expect(state.finalAnswer).not.toMatch(/don't have access/);
+  });
 });
 
 describe("graph — refund flow (§5.4 scripted demo path)", () => {
@@ -422,6 +533,62 @@ describe("graph — refund flow (§5.4 scripted demo path)", () => {
     expect(t2.state.pendingAction).toBeNull();
     const order = await h.store.getOrder("NW-88412");
     expect(order?.refundedCents).toBe(0);
+  });
+
+  it("a draft that says 'I can't issue the refund' never overrides an executed refund", async () => {
+    // Regression (Loom): after the user confirmed, the model drafted "I
+    // can't actually issue the refund from here, but you're good to go"
+    // even though the phase-2 tool result shows the refund WAS issued.
+    // The executed-refund answer is now built in code from the tool
+    // result, so the model cannot contradict it.
+    const h = harness();
+    await h.store.createSession(SESSION);
+    const t1 = await turn(h, {
+      userMessage: "I want a refund for order NW-88412.",
+      turnNumber: 1,
+    });
+    expect(t1.state.terminalState).toBe("awaiting_confirmation");
+
+    const mock = new MockChatModel();
+    const cantIssueDraftModel: ChatModel = {
+      name: "cant-issue-draft-mock",
+      async generate(opts) {
+        if (opts.task === "draft") {
+          return {
+            content: JSON.stringify({
+              answerText:
+                "I can't actually issue the refund from here, but you're good to go. Please submit the refund through your account's order page, or contact customer support.",
+              claims: [],
+            }),
+            toolCalls: [],
+            model: "cant-issue-draft-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const { state } = await runTurn({
+      store: h.store,
+      model: cantIssueDraftModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 2,
+      modality: "text",
+      userMessage: "Yes, confirm the refund.",
+      messages: [
+        { role: "user", content: "I want a refund for order NW-88412." },
+        { role: "assistant", content: t1.state.finalAnswer ?? "" },
+      ],
+      pendingAction: t1.state.pendingAction,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/refund RF-\d{4} for \$129\.00/);
+    expect(state.finalAnswer).toMatch(/3 to 5 business days/);
+    expect(state.finalAnswer).not.toMatch(/can't actually issue/);
+    expect(state.verifierResult?.passed).toBe(true);
+    const order = await h.store.getOrder("NW-88412");
+    expect(order?.refundedCents).toBe(12900);
   });
 
   it("over $500 → escalates after confirmation, no refund executed", async () => {
@@ -509,5 +676,51 @@ describe("graph — tool budget exhaustion", () => {
     expect(state.escalation?.rule).toBe("tool_budget_exhausted");
     expect(state.draft).toBeNull();
     expect(state.toolIterations).toBe(3);
+  });
+});
+
+describe("graph — out-of-scope guardrail (tent pole)", () => {
+  it("a tent-repair request gets a clean refusal + scope, not an invitation to rephrase", async () => {
+    // The mock router sends repair questions to policy_question (no
+    // "other" pattern matches them), so route explicitly here — the real
+    // model routes tent pole to "other", which is the path under test.
+    const mock = new MockChatModel();
+    const otherRouteModel: ChatModel = {
+      name: "other-route-mock",
+      async generate(opts) {
+        if (opts.task === "route") {
+          return {
+            content: JSON.stringify({
+              intent: "other",
+              sensitive: false,
+              sensitiveCategory: null,
+              standaloneQuery: "Can you fix my tent pole?",
+            }),
+            toolCalls: [],
+            model: "other-route-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: otherRouteModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Can you fix my tent pole?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.intent).toBe("other");
+    expect(state.finalAnswer).toMatch(/can't help with tent repairs/);
+    expect(state.finalAnswer).toMatch(/returns, refunds, order status/);
+    expect(state.finalAnswer).not.toMatch(/tell me a bit more/);
+    expect(state.escalation).toBeNull();
   });
 });
