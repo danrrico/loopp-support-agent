@@ -443,6 +443,17 @@ async function planTools(
     }
   }
 
+  // A business outcome (ORDER_NOT_FOUND, REFUND_NOT_ELIGIBLE, …) is a
+  // final answer, not a retry signal. The model re-calls the same tool
+  // when asked to plan again (observed live: initiateRefund called 3×
+  // for an already-refunded order, then tool_budget_exhausted and an
+  // escalation). Proceed straight to the draft, which reports the
+  // business outcome to the user.
+  const lastTool = state.toolCalls[state.toolCalls.length - 1];
+  if (lastTool && lastTool.outcome === "business") {
+    return { pendingToolCalls: [] };
+  }
+
   const calledTools = state.toolCalls.map((t) => t.tool);
   const lastLookup = [...state.toolCalls]
     .reverse()

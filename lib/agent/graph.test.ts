@@ -724,3 +724,32 @@ describe("graph — out-of-scope guardrail (tent pole)", () => {
     expect(state.escalation).toBeNull();
   });
 });
+
+describe("graph — business outcomes are final answers, not retries", () => {
+  it("a REFUND_NOT_ELIGIBLE result is reported, not re-called 3× then escalated", async () => {
+    // Regression (live): NW-88412 was already fully refunded in the DB,
+    // so initiateRefund returned REFUND_NOT_ELIGIBLE — and the plan step
+    // re-called it 3 times (tool_budget_exhausted → escalation) instead
+    // of telling the user why. A business outcome now goes to the draft.
+    const h = harness();
+    await h.store.createSession(SESSION);
+    // Fully refund the order first (mirrors the live DB state).
+    await h.store.executeRefund({
+      orderId: "NW-88412",
+      idempotencyKey: "seed-refund",
+      amountCents: 12900,
+      reason: "seed",
+      sessionId: SESSION,
+    });
+    const { state } = await turn(h, {
+      userMessage: "I want a refund for order NW-88412.",
+      turnNumber: 1,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/already.*refunded|fully refunded/i);
+    expect(state.escalation).toBeNull();
+    expect(
+      state.toolCalls.filter((t) => t.tool === "initiateRefund").length,
+    ).toBe(1);
+  });
+});
