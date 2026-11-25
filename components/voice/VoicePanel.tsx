@@ -9,6 +9,7 @@ import {
   type RealtimeClientEvent,
   type RealtimeVoiceClient,
 } from "@/lib/voice/realtime-client";
+import { VoiceTranscriptState } from "@/lib/voice/transcript-state";
 
 /**
  * Voice panel — live voice over WebRTC (architecture-v2.md §4).
@@ -19,9 +20,22 @@ import {
  *   emits the final transcript → POST /api/voice/transcript (same graph
  *   as text) → speak the graph's verbatim text via response.create.
  * A filler ("Let me check that for you.") covers the graph round-trip;
- * it is cancelled the moment the real answer is ready.
+ * it is cancelled the moment the real answer is ready (the client
+ * serializes create/cancel — see ResponseSequencer — so the answer is
+ * never created while the filler is still live).
  * Interruption (§4.5): speech while the agent is speaking cancels the
  * in-flight response and returns to listening.
+ *
+ * Concurrency guards (live 2026-11-25 — a double-tap on Talk opened two
+ * Realtime sessions on the same mic, duplicating every transcript and
+ * racing two graph turns into a 409):
+ * - handleTalk is guarded by a ref + a connecting state, so a second tap
+ *   while mint/connect is in flight is ignored and any pre-existing
+ *   client is disconnected first.
+ * - Each final transcript is submitted once per item_id (see
+ *   VoiceTranscriptState) — a duplicate delivery is dropped entirely.
+ * - A graph result is only spoken if its turn is still the latest; a
+ *   stale answer (user already spoke again) is dropped silently.
  */
 
 export type VoiceState =
@@ -61,6 +75,7 @@ interface TranscriptLine {
 
 export function VoicePanel({ onClose }: { onClose: () => void }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
@@ -72,6 +87,12 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const stateRef = useRef<VoiceState>("idle");
   const mountedRef = useRef(true);
+  const connectingRef = useRef(false);
+  // Draft accumulation + per-itemId submit dedupe (pure, unit-tested).
+  const transcriptStateRef = useRef(new VoiceTranscriptState());
+  // Generation counter: a graph result only speaks if its turn is still
+  // the latest — a stale answer (user already spoke again) is dropped.
+  const turnRef = useRef(0);
 
   function setState(next: VoiceState) {
     stateRef.current = next;
@@ -96,22 +117,34 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
   function handleClientEvent(event: RealtimeClientEvent) {
     if (!mountedRef.current) return;
     const client = clientRef.current;
+    const tstate = transcriptStateRef.current;
     switch (event.type) {
       case "ready":
         break;
       case "transcript-partial":
-        setUserDraft(event.text);
+        // Incremental deltas accumulate into ONE dimmed draft line in
+        // place — never a new line per chunk.
+        setUserDraft(tstate.accumulateUserPartial(event.itemId, event.text));
         break;
       case "transcript-final": {
+        tstate.clearUserDraft();
         setUserDraft(null);
         if (!event.text.trim()) break;
+        // Duplicate delivery of the same input item (double client /
+        // double event): drop it entirely — no second line, no second
+        // POST, no second graph turn.
+        if (tstate.isDuplicateFinal(event.itemId)) break;
+        tstate.markSubmitted(event.itemId);
         pushLine({ role: "user", text: event.text, final: true });
         setState("awaiting_graph");
+        const myTurn = ++turnRef.current;
         // Filler covers the graph round-trip; cancelled when the answer lands.
         client?.speak(VOICE_CONFIG.fillerText);
         void postVoiceTranscript(event.text, event.itemId)
           .then((result) => {
-            if (!mountedRef.current) return;
+            // Stale turn: the user already spoke again — do not speak
+            // this answer over the new utterance.
+            if (!mountedRef.current || turnRef.current !== myTurn) return;
             client?.cancelResponse();
             if (result.speakableText.trim()) {
               client?.speak(result.speakableText);
@@ -121,7 +154,7 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
             }
           })
           .catch((err: unknown) => {
-            if (!mountedRef.current) return;
+            if (!mountedRef.current || turnRef.current !== myTurn) return;
             client?.cancelResponse();
             setError(
               err instanceof Error
@@ -133,15 +166,26 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         break;
       }
       case "agent-transcript-partial":
-        setAgentDraft(event.text);
+        // Incremental deltas accumulate into ONE dimmed draft line —
+        // never a bare fragment ("that", "?") as its own line.
+        setAgentDraft(tstate.accumulateAgentPartial(event.text));
         break;
       case "agent-transcript-final":
+        tstate.clearAgentDraft();
         setAgentDraft(null);
         if (event.text.trim()) {
           pushLine({ role: "assistant", text: event.text, final: true });
         }
         break;
+      case "response-started":
+        // A new response starts — its partials belong to a fresh draft.
+        tstate.clearAgentDraft();
+        setAgentDraft(null);
+        break;
       case "speech-started":
+        // A new utterance started — drop any stale user draft.
+        tstate.clearUserDraft();
+        setUserDraft(null);
         // Barge-in (§4.5): stop the agent mid-sentence (or mid-filler),
         // listen to the user.
         if (
@@ -158,8 +202,6 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         }
         break;
       case "speech-stopped":
-        break;
-      case "response-started":
         break;
       case "response-done":
         if (stateRef.current === "speaking") setState("listening");
@@ -188,6 +230,14 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
   }
 
   async function handleTalk() {
+    // Double-tap guard: mint + connect is async and the button stays
+    // enabled until it resolves — a second tap used to open a second
+    // Realtime session on the same mic, duplicating every transcript
+    // and racing two graph turns into a 409.
+    if (connectingRef.current) return;
+    if (clientRef.current) return;
+    connectingRef.current = true;
+    setConnecting(true);
     setError(null);
     setInfo(null);
     try {
@@ -205,6 +255,8 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         client.disconnect();
         return;
       }
+      // Fresh call: new session, new item ids.
+      transcriptStateRef.current.resetSubmitted();
       clientRef.current = client;
       setMicStream(client.micStream);
       setState("listening");
@@ -222,6 +274,9 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
       } else {
         setError(e.message);
       }
+    } finally {
+      connectingRef.current = false;
+      setConnecting(false);
     }
   }
 
@@ -235,6 +290,9 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
     setTranscript([]);
     setUserDraft(null);
     setAgentDraft(null);
+    transcriptStateRef.current.resetSubmitted();
+    transcriptStateRef.current.clearUserDraft();
+    transcriptStateRef.current.clearAgentDraft();
     setState("disconnected");
     window.setTimeout(() => {
       if (mountedRef.current && stateRef.current === "disconnected") {
@@ -290,7 +348,12 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         <button
           type="button"
           onClick={handleTalk}
-          disabled={voiceState === "listening" || voiceState === "awaiting_graph" || voiceState === "speaking"}
+          disabled={
+            connecting ||
+            voiceState === "listening" ||
+            voiceState === "awaiting_graph" ||
+            voiceState === "speaking"
+          }
           className="rounded-full bg-zinc-900 px-5 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
         >
           🎙 Talk

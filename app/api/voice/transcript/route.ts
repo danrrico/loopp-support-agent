@@ -83,29 +83,58 @@ export async function POST(request: Request) {
   const { transcript, itemId, possiblyTruncated, interruptionMeta } =
     parsed.data;
 
-  let result;
-  try {
-    result = await runAgentTurn({
-      sessionId,
+  // Run the turn, retrying once on a version conflict. The in-memory
+  // session lock does not span Vercel instances, so two concurrent
+  // transcript POSTs (e.g. a duplicate delivery landing on two
+  // instances) can both pass the item_id dedup and race the optimistic
+  // version check. The retry re-loads the snapshot from the turn
+  // boundary: if the winner was the same utterance, dedup replays its
+  // stored result instead of running a second turn; if it was a
+  // different turn, this one re-runs against the fresh state. Only a
+  // second consecutive conflict surfaces as a 409.
+  // Narrowed to string by the if-block above; alias it so the nested
+  // runTurnOnce closure keeps the narrowed type (TS resets narrowing
+  // of `let` bindings inside closures).
+  const sid = sessionId;
+  async function runTurnOnce() {
+    return runAgentTurn({
+      sessionId: sid,
       userMessage: transcript,
       modality: "voice",
       itemId,
     });
+  }
+
+  let result;
+  try {
+    result = await runTurnOnce();
   } catch (err) {
     if (err instanceof VersionConflictError) {
+      try {
+        result = await runTurnOnce();
+      } catch (retryErr) {
+        if (retryErr instanceof VersionConflictError) {
+          return Response.json(
+            {
+              error: "Another turn ran concurrently for this session.",
+              code: "VERSION_CONFLICT",
+            },
+            { status: 409 },
+          );
+        }
+        console.error("[voice/transcript] turn failed on retry:", retryErr);
+        return Response.json(
+          { error: "The support agent hit an unexpected error.", code: "GRAPH_ERROR" },
+          { status: 500 },
+        );
+      }
+    } else {
+      console.error("[voice/transcript] turn failed:", err);
       return Response.json(
-        {
-          error: "Another turn ran concurrently for this session.",
-          code: "VERSION_CONFLICT",
-        },
-        { status: 409 },
+        { error: "The support agent hit an unexpected error.", code: "GRAPH_ERROR" },
+        { status: 500 },
       );
     }
-    console.error("[voice/transcript] turn failed:", err);
-    return Response.json(
-      { error: "The support agent hit an unexpected error.", code: "GRAPH_ERROR" },
-      { status: 500 },
-    );
   }
 
   const headers: Record<string, string> = {};

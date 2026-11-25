@@ -27,7 +27,7 @@ export const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
 export type RealtimeClientEvent =
   | { type: "ready" }
-  | { type: "transcript-partial"; text: string }
+  | { type: "transcript-partial"; text: string; itemId: string }
   | { type: "transcript-final"; text: string; itemId: string }
   | { type: "agent-transcript-partial"; text: string }
   | { type: "agent-transcript-final"; text: string }
@@ -70,6 +70,100 @@ export function buildResponseCreatePayload(
   };
 }
 
+export type ResponsePhase = "idle" | "creating" | "active" | "cancelling";
+
+/**
+ * Serializes Realtime response.create / response.cancel so the client
+ * never has two responses in flight.
+ *
+ * Regression (live 2026-11-25): the panel spoke the filler
+ * ("Let me check that for you.") via response.create, then — the moment
+ * the graph answer landed — sent response.cancel AND a second
+ * response.create back-to-back. The server had not processed the cancel
+ * yet, so the create failed with "Conversation already has an active
+ * response in progress: resp_…". The fix: a create is only sent when no
+ * response is live; a speak() issued while one is live cancels it first
+ * and queues the text until the server confirms the cancel
+ * (response.cancelled / response.done). Latest speak wins; a barge-in
+ * cancel discards queued speech.
+ */
+export class ResponseSequencer {
+  private phase: ResponsePhase = "idle";
+  private pendingSpeak: string | null = null;
+  private creatingText: string | null = null;
+  private cancelRequested = false;
+
+  constructor(private send: (event: Record<string, unknown>) => void) {}
+
+  /** Queue text to speak; sent only when no response is live. Latest wins. */
+  speak(text: string): void {
+    this.pendingSpeak = text;
+    if (this.phase === "idle") this.flush();
+    else this.requestCancel();
+  }
+
+  /** Cancel the live (or in-flight) response; discards queued speech. */
+  cancel(): void {
+    this.pendingSpeak = null;
+    this.cancelRequested = true;
+    this.requestCancel();
+  }
+
+  /** Server confirmed a response was created. */
+  onCreated(): void {
+    this.phase = "active";
+    this.creatingText = null;
+    if (this.cancelRequested) {
+      this.cancelRequested = false;
+      this.requestCancel();
+    } else if (this.pendingSpeak !== null) {
+      this.requestCancel();
+    }
+  }
+
+  /** Server confirmed the response ended (done or cancelled). */
+  onEnded(): void {
+    this.phase = "idle";
+    this.creatingText = null;
+    this.cancelRequested = false;
+    this.flush();
+  }
+
+  /**
+   * Server rejected a create because another response is still active.
+   * Should be unreachable once creates are serialized, but recover
+   * instead of surfacing a red banner: re-queue the failed text, cancel
+   * the live response, and let the cancel confirmation flush the retry.
+   */
+  onActiveResponseError(): void {
+    if (this.phase === "creating" && this.creatingText !== null) {
+      this.pendingSpeak = this.creatingText;
+      this.creatingText = null;
+      this.phase = "active";
+      this.requestCancel();
+    }
+  }
+
+  private requestCancel(): void {
+    if (this.phase === "active") {
+      this.phase = "cancelling";
+      this.send({ type: "response.cancel" });
+    }
+    // "creating": the onCreated handler cancels it as soon as it exists.
+    // "cancelling"/"idle": nothing to cancel.
+  }
+
+  private flush(): void {
+    if (this.pendingSpeak === null || this.phase !== "idle") return;
+    const text = this.pendingSpeak;
+    this.pendingSpeak = null;
+    this.creatingText = text;
+    this.phase = "creating";
+    this.cancelRequested = false;
+    this.send(buildResponseCreatePayload(text));
+  }
+}
+
 export interface ConnectOptions {
   ephemeralKey: string;
   model: string;
@@ -101,11 +195,6 @@ export async function connectRealtimeVoice(
 
   const pc = new RTCPeerConnection();
   let closed = false;
-  // True only between a server-confirmed response.created and its
-  // response.done / response.cancelled. cancelResponse() no-ops while
-  // false, so a cancel after a failed create (or a finished response)
-  // never reaches the server — no "no active response" error.
-  let responseActive = false;
   let lastActivityAt = Date.now();
   const connectedAt = Date.now();
 
@@ -146,6 +235,13 @@ export async function connectRealtimeVoice(
 
   const dc = pc.createDataChannel("oai-events");
 
+  // Serializes response.create / response.cancel — see ResponseSequencer.
+  const sequencer = new ResponseSequencer((event) => {
+    if (!closed && dc.readyState === "open") {
+      dc.send(JSON.stringify(event));
+    }
+  });
+
   dc.onmessage = (msg) => {
     let event: Record<string, unknown>;
     try {
@@ -173,6 +269,7 @@ export async function connectRealtimeVoice(
         onEvent({
           type: "transcript-partial",
           text: String(event.delta ?? ""),
+          itemId: String(event.item_id ?? ""),
         });
         break;
       case "conversation.item.input_audio_transcription.completed": {
@@ -202,17 +299,17 @@ export async function connectRealtimeVoice(
         break;
       case "response.created":
         markActivity();
-        responseActive = true;
+        sequencer.onCreated();
         onEvent({ type: "response-started" });
         break;
       case "response.done":
-        responseActive = false;
         markActivity();
+        sequencer.onEnded();
         onEvent({ type: "response-done" });
         break;
       case "response.cancelled":
-        responseActive = false;
         markActivity();
+        sequencer.onEnded();
         onEvent({ type: "response-done" });
         break;
       case "error": {
@@ -222,6 +319,13 @@ export async function connectRealtimeVoice(
         // (or after a failed create) has no active response to cancel.
         // Never surface that as a user-facing error banner.
         if (/no active response/i.test(message)) return;
+        // A create that raced a still-live response: the sequencer
+        // re-queues the text and cancels the live one, so the retry
+        // lands cleanly. Never surface it either — it is recoverable.
+        if (/active response in progress/i.test(message)) {
+          sequencer.onActiveResponseError();
+          return;
+        }
         onEvent({ type: "error", message });
         break;
       }
@@ -282,16 +386,17 @@ export async function connectRealtimeVoice(
     speak(text: string) {
       if (closed || dc.readyState !== "open") return;
       markActivity();
-      dc.send(JSON.stringify(buildResponseCreatePayload(text)));
+      // The sequencer sends the create only when no response is live;
+      // if one is (filler still speaking), it cancels it first and
+      // queues this text until the cancel is confirmed server-side.
+      sequencer.speak(text);
     },
     cancelResponse() {
-      // No active response (failed create, already finished, or never
-      // started) — silently ignore. Sending response.cancel then would
-      // make the server answer "no active response", which used to
-      // surface as a red error banner for a non-error.
-      if (closed || dc.readyState !== "open" || !responseActive) return;
-      responseActive = false;
-      dc.send(JSON.stringify({ type: "response.cancel" }));
+      // No-op when nothing is live (sequencer tracks it); a cancel
+      // requested while a create is still in flight cancels it as soon
+      // as the server confirms it exists.
+      if (closed || dc.readyState !== "open") return;
+      sequencer.cancel();
     },
     disconnect(reason: "ended" | "idle" | "cap" = "ended") {
       shutdown(reason);
