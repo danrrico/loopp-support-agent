@@ -402,6 +402,10 @@ async function planTools(
     calledTools,
     orderLookupResult: lastLookup ? (lastLookup.result as Record<string, unknown>) : null,
     pendingAction: state.pendingAction,
+    retrievedChunks: state.retrievedChunks.map((c) => ({
+      policySlug: c.policySlug,
+      section: c.section,
+    })),
   });
 
   let result;
@@ -454,8 +458,23 @@ async function planTools(
     return { pendingToolCalls: [result.toolCalls[0]] };
   }
 
-  // Plain-text reply from the plan step = a clarifying question.
+  // Plain-text reply from the plan step = a clarifying question — EXCEPT
+  // for retrieval-gated intents (policy_question / complaint), where the
+  // answer comes from the retrieved policy text via the VERIFIED draft.
+  // Plan-step text bypasses the verifier entirely, so a model that answers
+  // the policy question here streams an unverified answer (observed live:
+  // "30 days" when the retrieved policy says 60). Discard the text and
+  // generate from the chunks instead; only refund / order_status genuinely
+  // need information from the user (e.g. the order number).
   if (result.content.trim().length > 0) {
+    const intent = (state.intent ?? "policy_question") as Intent;
+    if (intent === "policy_question" || intent === "complaint") {
+      trace.emit("error", {
+        node: "plan_tools",
+        note: "Plan step returned plain text for a retrieval-gated intent; discarding it — the answer is generated from the retrieved policy text and verified before streaming.",
+      });
+      return { pendingToolCalls: [] };
+    }
     trace.emit("awaiting_user", { question: result.content });
     const pendingAction: PendingAction | null =
       state.intent === "refund"

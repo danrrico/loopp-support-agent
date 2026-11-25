@@ -40,6 +40,47 @@ async function turn(
   });
 }
 
+describe("graph — plan step cannot answer a policy question directly", () => {
+  it("a plan-step direct answer ('30 days') is discarded; the verified draft from the chunks wins", async () => {
+    // Wraps the mock: route + draft behave normally, but the plan step
+    // answers the policy question directly as plain text — exactly what
+    // gpt-4o-mini did live (hallucinated "30 days" vs the 60-day policy).
+    // That text must never stream: it bypasses the verifier.
+    const mock = new MockChatModel();
+    const answeringModel: ChatModel = {
+      name: "answering-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          return {
+            content:
+              "The return policy allows customers to return items within 30 days of receipt for a full refund.",
+            toolCalls: [],
+            model: "answering-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: answeringModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "What is your return policy?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/60 days/);
+    expect(state.finalAnswer).not.toMatch(/30 days/);
+    expect(state.verifierResult?.passed).toBe(true);
+  });
+});
+
 describe("graph — policy questions", () => {
   it("'How do I return a jacket?' routes to refund and clarifies (no order ID yet)", async () => {
     const h = harness();

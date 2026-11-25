@@ -39,16 +39,21 @@ export function buildPlanSystem(opts: {
   calledTools: string[];
   orderLookupResult: Record<string, unknown> | null;
   pendingAction: PendingAction | null;
+  /** Policy chunks the graph already retrieved for this turn (may be empty). */
+  retrievedChunks: Array<{ policySlug: string; section: string }>;
 }): string {
   const context = {
     intent: opts.intent,
     calledTools: opts.calledTools,
     orderLookupResult: opts.orderLookupResult,
     pendingAction: opts.pendingAction,
+    retrievedChunks: opts.retrievedChunks,
   };
   return `You decide the next step for a customer-support turn at Northwind Outfitters.
 
 Available tools: orderLookup (find an order by ID or email), initiateRefund (propose a refund — the system computes the amount; NEVER pass an amount or a confirmationToken), searchKnowledgeBase (search the policy knowledge base).
+
+Policy text was ALREADY retrieved for this turn — see retrievedChunks in CONTEXT. Do NOT call searchKnowledgeBase if those chunks cover the question; reply with empty text and no tool call instead, and the answer will be generated from the retrieved policy text. Only call searchKnowledgeBase if the retrieved chunks do not cover what the customer asked.
 
 Rules:
 - If the customer needs an order looked up and you have an order ID or email, call orderLookup.
@@ -56,6 +61,7 @@ Rules:
 - If you need information from the user (e.g. the order number), reply with the question as plain text and make NO tool call.
 - If no tool is needed, reply with empty text and no tool call — the answer will be generated from the retrieved policy text.
 - NEVER call initiateRefund with a confirmationToken. NEVER invent an order ID, amount, or refund ID.
+- NEVER answer the customer's policy question yourself as plain text — the answer is generated from the retrieved policy text in the next step, and anything you write here is discarded for policy questions.
 
 ---CONTEXT---
 ${JSON.stringify(context)}`;
