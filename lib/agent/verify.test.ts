@@ -444,3 +444,107 @@ describe("verifyDraft — (noun, verb) attestation (return-policy live failure)"
     );
   });
 });
+
+describe("verifyDraft — quote grounding (wrong chunkId / paraphrase drift)", () => {
+  it("passes a verbatim quote cited to the wrong chunkId (re-attribution)", () => {
+    // Live Nov 25: the draft's claim 3 quoted a real policy sentence but
+    // cited the 60-Day chunkId for it. The evidence is real; only the
+    // citation was mislabeled — that must not withhold the answer.
+    const r = verifyDraft(
+      {
+        answerText:
+          "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method. Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+        claims: [
+          {
+            text: "60-day return window",
+            chunkId: "supabase:returns:0",
+            quote:
+              "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method.",
+          },
+          {
+            text: "refunds issued 3 to 5 business days",
+            chunkId: "supabase:returns:0",
+            quote:
+              "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+          },
+        ],
+      },
+      RETURN_POLICY_CHUNKS,
+      [],
+    );
+    expect(r.failedAsserts).toEqual([]);
+    expect(r.passed).toBe(true);
+  });
+
+  it("passes a slightly drifted quote (dropped words, high token overlap)", () => {
+    const r = verifyDraft(
+      {
+        answerText:
+          "You can return any unused item within 60 days of the delivery date for a full refund to your original payment method.",
+        claims: [
+          {
+            text: "60-day return window",
+            chunkId: "supabase:returns:0",
+            quote:
+              "You can return any unused item within 60 days of delivery for a full refund",
+          },
+        ],
+      },
+      RETURN_POLICY_CHUNKS,
+      [],
+    );
+    expect(r.failedAsserts).toEqual([]);
+    expect(r.passed).toBe(true);
+  });
+
+  it("still fails a fabricated quote (novel words, low overlap)", () => {
+    const r = verifyDraft(
+      {
+        answerText:
+          "You can return any item within 90 days for store credit.",
+        claims: [
+          {
+            text: "90-day store credit",
+            chunkId: "supabase:returns:0",
+            quote:
+              "You can return any item within 90 days for store credit.",
+          },
+        ],
+      },
+      RETURN_POLICY_CHUNKS,
+      [],
+    );
+    expect(r.passed).toBe(false);
+    expect(
+      r.failedAsserts.some((a) => a.startsWith("quote_substring")),
+    ).toBe(true);
+  });
+
+  it("still fails a wrong-number quote (30 days in the 60-day window)", () => {
+    // 5 of 6 content tokens match the 60-day chunk (0.833 < 0.85), and
+    // the defective chunk lacks "unused" — so the drifted number is not
+    // rescued by fuzzy matching. The number assert alone would NOT catch
+    // this ("30" does appear in the corpus, in the defective chunk), so
+    // the quote assert is the guard here.
+    const r = verifyDraft(
+      {
+        answerText:
+          "You can return any unused item within 30 days of the delivery date for a full refund.",
+        claims: [
+          {
+            text: "30-day return window",
+            chunkId: "supabase:returns:0",
+            quote:
+              "You can return any unused item within 30 days of the delivery date for a full refund.",
+          },
+        ],
+      },
+      RETURN_POLICY_CHUNKS,
+      [],
+    );
+    expect(r.passed).toBe(false);
+    expect(
+      r.failedAsserts.some((a) => a.startsWith("quote_substring")),
+    ).toBe(true);
+  });
+});

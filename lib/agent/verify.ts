@@ -11,10 +11,14 @@
  * claim carries the chunk it came from and the exact quote supporting it.
  *
  * Asserts:
- * 1. Quote-substring: each claim's quote is a substring of the chunk
- *    identified by chunkId (chunk text fetched server-side, never trusted
- *    from the model). Comparison is whitespace-collapsed + case-insensitive
- *    so minor model formatting drift doesn't fail a true quote.
+ * 1. Quote grounding: each claim's quote must be grounded in the
+ *    retrieved chunks — verbatim in the cited chunk, verbatim in ANY
+ *    retrieved chunk (the model sometimes cites the wrong chunkId), or
+ *    a ≥85% token-overlap fuzzy match in one chunk (a word/punctuation
+ *    drift, not a fabrication). Comparison is whitespace-collapsed +
+ *    case-insensitive so minor model formatting drift doesn't fail a
+ *    true quote. A quote matching nothing is still fabrication and fails.
+ *    (Chunk text is fetched server-side, never trusted from the model.)
  * 2. Number assert: every number, day-count, and dollar amount in
  *    answerText appears in the retrieved chunks OR in the turn's tool
  *    results (refund amounts, order totals, order IDs come from tools, not
@@ -151,6 +155,67 @@ const ACTION_VERBS = new Set(
 );
 
 /**
+ * True when a claim's quote is grounded in the retrieved evidence, in
+ * three tiers of increasing tolerance. The model is instructed to copy
+ * quotes verbatim, and usually does — but it sometimes cites the wrong
+ * chunkId for a real quote, or drifts a word/punctuation mark. Withholding
+ * a correct answer over a mislabeled or slightly drifted quote is a false
+ * positive; the number and action-claim asserts still guard the answer
+ * text itself. A quote that matches nothing is still fabrication and
+ * fails. Tier 1: verbatim in the cited chunk. Tier 2: verbatim in ANY
+ * retrieved chunk (wrong chunkId — the evidence is real, the citation
+ * was mislabeled). Tier 3: fuzzy — at least 85% of the quote's content
+ * tokens (stemmed, stopwords dropped, via the shared tokenize) appear in
+ * a single chunk, AND every number in the quote appears in that same
+ * chunk (a wrong number must not be rescued by overlap alone, since the
+ * number assert only checks that the number appears somewhere in the
+ * corpus). Quotes under 3 content tokens need an exact match — there is
+ * too little signal to fuzzy-match them.
+ */
+function quoteIsGrounded(
+  quote: string,
+  citedContent: string,
+  chunks: RetrievalHit[],
+  chunkTokenSets: Array<Set<string>>,
+): boolean {
+  const normalizedQuote = normalize(quote);
+  if (!normalizedQuote) return false;
+  // Tier 1: verbatim in the cited chunk.
+  if (normalize(citedContent).includes(normalizedQuote)) return true;
+  // Tier 2: verbatim in any retrieved chunk (wrong chunkId).
+  if (
+    chunks.some((c) => normalize(c.content).includes(normalizedQuote))
+  ) {
+    return true;
+  }
+  // Tier 3: fuzzy — ≥85% of the quote's content tokens in one chunk,
+  // AND every number in the quote appears in that SAME chunk. The number
+  // guard matters: a wrong number ("30 days" for the 60-day window) has
+  // 9/10 tokens matching the right chunk, so overlap alone would rescue
+  // it — and the number assert cannot catch it, because "30" appears
+  // elsewhere in the corpus (the defective chunk). Numbers must be
+  // attested in the same chunk as the rest of the quote.
+  const quoteTokens = tokenize(quote);
+  if (quoteTokens.length < 3) return false;
+  const quoteSet = new Set(quoteTokens);
+  const quoteNumbers = extractNumbers(quote).map(normalizeNumber);
+  return chunkTokenSets.some((chunkTokens, idx) => {
+    let hits = 0;
+    for (const t of quoteSet) {
+      if (chunkTokens.has(t)) hits++;
+    }
+    if (hits / quoteSet.size < 0.85) return false;
+    if (quoteNumbers.length > 0) {
+      const chunkNumbers = new Set(
+        extractNumbers(chunks[idx].content).map(normalizeNumber),
+      );
+      if (!quoteNumbers.every((n) => chunkNumbers.has(n))) return false;
+    }
+    return true;
+  });
+}
+
+/**
  * True when the matched action phrase is a restatement of policy: EVERY
  * action verb in the span is attested in some retrieved chunk together
  * with an action noun from the same span. "Every" matters — a span that
@@ -185,6 +250,10 @@ export function verifyDraft(
 ): VerifyResult {
   const failedAsserts: string[] = [];
   const byId = new Map(chunks.map((c) => [c.chunkId, c.content]));
+  // Token sets of the retrieved chunks, computed once: the attestation
+  // (assert 3) and fuzzy-quote (assert 1) checks are set-membership
+  // tests per claim/match, not substring scans.
+  const chunkTokenSets = chunks.map((c) => new Set(tokenize(c.content)));
 
   // 1. Quote-substring assert.
   for (let i = 0; i < draft.claims.length; i++) {
@@ -196,11 +265,12 @@ export function verifyDraft(
       );
       continue;
     }
-    if (!normalize(chunkContent).includes(normalize(claim.quote))) {
-      failedAsserts.push(
-        `quote_substring: claim ${i} quote not found in chunk ${claim.chunkId}`,
-      );
+    if (quoteIsGrounded(claim.quote, chunkContent, chunks, chunkTokenSets)) {
+      continue;
     }
+    failedAsserts.push(
+      `quote_substring: claim ${i} quote not found in chunk ${claim.chunkId}`,
+    );
   }
 
   // 2. Number assert — allowed numbers = chunks ∪ ok/business tool results.
@@ -232,9 +302,6 @@ export function verifyDraft(
   const successfulTools = new Set(
     toolCalls.filter((tc) => tc.outcome === "ok").map((tc) => tc.tool),
   );
-  // Token sets of the retrieved chunks, computed once: the attestation
-  // check is a set-membership test per match, not a substring scan.
-  const chunkTokenSets = chunks.map((c) => new Set(tokenize(c.content)));
   for (const { pattern, tool, label } of ACTION_CLAIMS) {
     // Check every match, not just the first: a policy restatement early in
     // the answer must not mask a genuine action claim later in it.
