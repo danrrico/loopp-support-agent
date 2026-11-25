@@ -16,9 +16,18 @@ import { z } from "zod";
 
 const ORDER_ID_RE = /^NW-\d{5}$/i;
 
-/** Normalize an order ID: trim + uppercase. */
+/**
+ * Normalize an order ID: trim, uppercase, strip internal spaces, and insert
+ * the hyphen when the model passes the bare form ("NW88412" / "NW 88412" —
+ * the spoken form, e.g. "NW eight eight four one two"). The regex below
+ * still enforces the canonical NW-##### shape; normalization only repairs
+ * formatting, so a genuinely malformed ID still fails validation instead
+ * of becoming a system error that counts toward the two-error escalation.
+ */
 function normalizeOrderId(id: string): string {
-  return id.trim().toUpperCase();
+  const compact = id.trim().toUpperCase().replace(/\s+/g, "");
+  const bare = compact.match(/^NW(\d{5})$/);
+  return bare ? `NW-${bare[1]}` : compact;
 }
 
 export const orderLookupSchema = z

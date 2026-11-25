@@ -393,6 +393,23 @@ async function planTools(
     return { pendingToolCalls: [] };
   }
 
+  // An order already looked up this turn → straight to the draft. Without
+  // this, the plan step re-issues the same orderLookup on every iteration
+  // (observed live: 3 calls for one question), and each re-call is another
+  // chance for a validation/system failure to trip the two-error
+  // escalation. It also routes the answer through the VERIFIED draft
+  // (generate_draft → verify_claims → answer_ready): the plan step must
+  // never answer an order-status question in plain text, which bypasses
+  // the verifier entirely and ends the turn in awaiting_user.
+  if (
+    state.intent === "order_status" &&
+    state.toolCalls.some(
+      (t) => t.tool === "orderLookup" && t.outcome === "ok",
+    )
+  ) {
+    return { pendingToolCalls: [] };
+  }
+
   const calledTools = state.toolCalls.map((t) => t.tool);
   const lastLookup = [...state.toolCalls]
     .reverse()

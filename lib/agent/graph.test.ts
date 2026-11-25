@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { runTurn } from "@/lib/agent/graph";
-import { MockChatModel, type ChatModel } from "@/lib/agent/model";
+import {
+  extractMockContext,
+  MockChatModel,
+  type ChatModel,
+} from "@/lib/agent/model";
 import { MemoryStore } from "@/lib/db/memory-store";
 import { MockEmbedder } from "@/lib/rag/embeddings";
 import type { PendingAction } from "@/lib/agent/state";
@@ -212,6 +216,109 @@ describe("graph — order status", () => {
     expect(state.terminalState).toBe("answer_ready");
     expect(state.finalAnswer).toMatch(/couldn't find an order/);
     expect(state.escalation).toBeNull();
+  });
+
+  it("a plan step that answers in plain text after the lookup is bypassed — the verified draft wins, lookup called exactly once", async () => {
+    // Reproduces the live failure: after a successful orderLookup,
+    // gpt-4o-mini answered the question as plain text in the next plan
+    // step, which the graph treated as a clarifying question
+    // (awaiting_user) — bypassing the verifier. With the early return in
+    // planTools, the turn goes straight to the verified draft instead.
+    const mock = new MockChatModel();
+    const answeringModel: ChatModel = {
+      name: "order-answering-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          const ctx = extractMockContext(opts.system);
+          const calledTools = (ctx.calledTools as string[]) ?? [];
+          if (!calledTools.includes("orderLookup")) {
+            return {
+              content: "",
+              toolCalls: [
+                {
+                  id: "mock_call_orderLookup",
+                  name: "orderLookup",
+                  arguments: { orderId: "NW-88413" },
+                },
+              ],
+              model: "order-answering-plan-mock",
+            };
+          }
+          return {
+            content:
+              "Your order NW-88413 has been shipped and should arrive soon.",
+            toolCalls: [],
+            model: "order-answering-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: answeringModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order NW-88413?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    // The VERIFIED draft's wording, not the plan step's plain text.
+    expect(state.finalAnswer).toMatch(/NW-88413 is shipped/);
+    expect(state.finalAnswer).not.toMatch(/should arrive soon/);
+    expect(state.verifierResult?.passed).toBe(true);
+    expect(
+      state.toolCalls.filter((t) => t.tool === "orderLookup").length,
+    ).toBe(1);
+    expect(state.toolIterations).toBe(1);
+  });
+
+  it("a bare order ID without the hyphen (NW88412) is normalized and answered, not escalated", async () => {
+    // The spoken form "NW eight eight four one two" reaches the tool as
+    // NW88412; without normalization the zod validation fails twice for
+    // the same args hash and the turn escalates (tool_system_failure).
+    const mock = new MockChatModel();
+    const bareIdModel: ChatModel = {
+      name: "bare-id-plan-mock",
+      async generate(opts) {
+        if (opts.task === "plan") {
+          return {
+            content: "",
+            toolCalls: [
+              {
+                id: "mock_call_orderLookup",
+                name: "orderLookup",
+                arguments: { orderId: "NW88412" },
+              },
+            ],
+            model: "bare-id-plan-mock",
+          };
+        }
+        return mock.generate(opts);
+      },
+    };
+    const h = harness();
+    const { state } = await runTurn({
+      store: h.store,
+      model: bareIdModel,
+      embedder: h.embedder,
+      sessionId: SESSION,
+      turnNumber: 1,
+      modality: "text",
+      userMessage: "Where is my order NW-88412?",
+      messages: [],
+      pendingAction: null,
+      sessionEscalated: false,
+    });
+    expect(state.terminalState).toBe("answer_ready");
+    expect(state.finalAnswer).toMatch(/NW-88412 is delivered/);
+    expect(state.escalation).toBeNull();
+    expect(state.verifierResult?.passed).toBe(true);
   });
 });
 
