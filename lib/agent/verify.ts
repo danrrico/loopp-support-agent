@@ -225,11 +225,28 @@ function quoteIsGrounded(
  * way") cannot be attested, so a draft claiming it still fails — as it
  * should. In this corpus the attested verbs are "issued" (Refund Timing)
  * and "shipped" (order cancellation); the rest are unattested by design.
+ *
+ * Attestation alone does not establish generic policy voice: "Your
+ * refund has been issued" pairs an attested (refund, issued) with a
+ * customer-specific claim — it asserts THIS user's refund was issued.
+ * A perfect-tense verb ("has/have been issued") marks the span as
+ * customer-specific, so attestation does not exempt it; only a tool
+ * call can substantiate it. (A bare possessive "your" is NOT a marker
+ * — policy answers use "your" generically, e.g. "issued to your
+ * original payment method", which the chunks themselves say.)
  */
 function restatesPolicy(
   matchedText: string,
   chunkTokenSets: Array<Set<string>>,
 ): boolean {
+  // Perfect tense = the action already happened for this customer.
+  if (
+    /\b(has|have)\s+been\s+(initiated|processed|started|issued|sent|emailed|shipped|created|opened|filed)\b/i.test(
+      matchedText,
+    )
+  ) {
+    return false;
+  }
   const matchTokens = new Set(tokenize(matchedText));
   const nouns = [...matchTokens].filter((t) => ACTION_NOUNS.has(t));
   const verbs = [...matchTokens].filter((t) => ACTION_VERBS.has(t));

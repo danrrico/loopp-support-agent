@@ -417,6 +417,34 @@ describe("verifyDraft — (noun, verb) attestation (return-policy live failure)"
     );
   });
 
+  it("still fails a customer-specific perfect-tense claim ('Your refund has been issued')", () => {
+    // Second-model review (Kimi): attestation alone does not establish
+    // generic policy voice — "Your refund has been issued" pairs the
+    // attested (refund, issued) with a claim that THIS user's refund was
+    // issued. The perfect tense marks it customer-specific, so only a
+    // tool call can substantiate it. A bare "your" is NOT a marker (the
+    // policy itself says "issued to your original payment method").
+    const r = verifyDraft(
+      {
+        answerText: "Your refund has been issued to your original payment method.",
+        claims: [
+          {
+            text: "refund issued",
+            chunkId: "supabase:returns:1",
+            quote:
+              "Approved refunds are issued to your original payment method within 3 to 5 business days after inspection.",
+          },
+        ],
+      },
+      RETURN_POLICY_CHUNKS,
+      [],
+    );
+    expect(r.passed).toBe(false);
+    expect(r.failedAsserts.some((a) => a.startsWith("action_claim"))).toBe(
+      true,
+    );
+  });
+
   it("still fails an unattested synonym ('processed') — the policy never says it", () => {
     // Deliberately conservative: "processed" appears in NO chunk, so the
     // draft prompt now nudges the model to use the policy's own verb
