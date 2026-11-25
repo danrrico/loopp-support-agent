@@ -30,8 +30,10 @@ import {
 import { runAgentTurn } from "@/lib/turn-runner";
 import type { TraceEvent } from "@/lib/trace";
 
-// Hobby plan limit until the Vercel plan is confirmed (Pro: 60s).
-export const maxDuration = 10;
+// 60s: a cold start (~8s) + a full graph turn (~6s) does not fit in the
+// 10s default — the function was killed mid-turn on cold starts. 60s is
+// the Hobby maximum under the pre-Fluid limit and well under Fluid's 300s.
+export const maxDuration = 60;
 
 const bodySchema = z.object({
   message: z.string().min(1).max(4000),

@@ -14,8 +14,8 @@
  * Without an OpenAI key the route still answers 503 VOICE_NOT_CONFIGURED.
  */
 
-// Hobby plan limit until the Vercel plan is confirmed (Pro: 60s).
-export const maxDuration = 10;
+// 60s: same cold-start headroom as /api/chat (see that route).
+export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
 import { checkMintRateLimit } from "@/lib/rate-limit";

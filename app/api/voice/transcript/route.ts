@@ -28,8 +28,8 @@ import {
 } from "@/lib/session";
 import { runAgentTurn } from "@/lib/turn-runner";
 
-// Hobby plan limit until the Vercel plan is confirmed (Pro: 60s).
-export const maxDuration = 10;
+// 60s: same cold-start headroom as /api/chat (see that route).
+export const maxDuration = 60;
 
 const bodySchema = z.object({
   transcript: z.string().min(1).max(2000),
