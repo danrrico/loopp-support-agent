@@ -25,14 +25,21 @@
  *    with no tool record fails. Claims with NO corresponding tool (e.g. a
  *    return label — no such tool exists) always fail, which makes them
  *    structurally impossible, not just editorially forbidden. EXCEPTION: a
- *    matched phrase that appears verbatim in a retrieved chunk is a
- *    restatement of policy, not a claim of action — "Refunds are issued
- *    within 3 to 5 business days" is in the Refund Timing chunk, so a
- *    draft repeating it must not fail. Only pairings the evidence never
- *    makes ("I've initiated your refund") are flagged.
+ *    matched phrase whose (noun, verb) pairing is attested in a retrieved
+ *    chunk is a restatement of policy, not a claim of action — "Refunds
+ *    are issued within 3 to 5 business days" restates the Refund Timing
+ *    chunk, so a draft repeating it must not fail. Only pairings the
+ *    evidence never makes ("I've initiated your refund", "refund on its
+ *    way") are flagged. A verbatim-substring exemption is NOT enough:
+ *    the regex spans sentence boundaries ("refund or replacement.
+ *    Refunds are issued") and the model paraphrases ("will be issued
+ *    instead of a refund"), so verbatim almost never fires on real
+ *    model output — the pairing check is what actually exempts
+ *    restatements.
  */
 
 import type { RetrievalHit } from "@/lib/rag/retrieve";
+import { tokenize } from "@/lib/rag/text";
 
 export interface DraftClaim {
   text: string;
@@ -90,7 +97,11 @@ const ACTION_CLAIMS: Array<{
 }> = [
   {
     // Both word orders: "refund ... initiated" and "initiated ... refund".
-    pattern: /\brefund\b.{0,40}\b(initiated|processed|started|on (its|the) way|issued|sent)\b|\b(initiated|processed|started|issued|sent)\b.{0,40}\brefund\b/i,
+    // `refunds?` (not just `refund`): policy descriptions use the plural
+    // ("Refunds are issued"), and a plural action claim ("Refunds are
+    // initiated") must match too — attestation, not the regex, decides
+    // whether the match is a restatement.
+    pattern: /\brefunds?\b.{0,40}\b(initiated|processed|started|on (its|the) way|issued|sent)\b|\b(initiated|processed|started|issued|sent)\b.{0,40}\brefunds?\b/i,
     tool: "initiateRefund",
     label: "refund initiated",
   },
@@ -110,6 +121,62 @@ const ACTION_CLAIMS: Array<{
     label: "replacement shipped (no such tool exists)",
   },
 ];
+
+// Nouns and verbs that make an action phrase, stemmed via the shared
+// tokenize() so "refunds" matches "refund" and "issued" matches "issue".
+// Used by the attestation check below: a matched phrase is a policy
+// restatement when its (noun, verb) pairing is attested in a retrieved
+// chunk. "way" covers the "on its way" / "on the way" phrasings
+// (tokenize drops "on"/"its"/"the" as stopwords, leaving "way").
+const ACTION_NOUNS = new Set(
+  ["refund", "label", "ticket", "replacement", "item"].flatMap((w) =>
+    tokenize(w),
+  ),
+);
+const ACTION_VERBS = new Set(
+  [
+    "initiated",
+    "processed",
+    "started",
+    "issued",
+    "sent",
+    "emailed",
+    "shipped",
+    "created",
+    "opened",
+    "filed",
+    "arriving",
+    "way",
+  ].flatMap((w) => tokenize(w)),
+);
+
+/**
+ * True when the matched action phrase is a restatement of policy: EVERY
+ * action verb in the span is attested in some retrieved chunk together
+ * with an action noun from the same span. "Every" matters — a span that
+ * pairs an attested verb with an unattested one ("refund was initiated
+ * and will be issued") is still a claim. A verb the policy never uses
+ * ("initiated", "processed", "started", "sent", "emailed", "on its
+ * way") cannot be attested, so a draft claiming it still fails — as it
+ * should. In this corpus the attested verbs are "issued" (Refund Timing)
+ * and "shipped" (order cancellation); the rest are unattested by design.
+ */
+function restatesPolicy(
+  matchedText: string,
+  chunkTokenSets: Array<Set<string>>,
+): boolean {
+  const matchTokens = new Set(tokenize(matchedText));
+  const nouns = [...matchTokens].filter((t) => ACTION_NOUNS.has(t));
+  const verbs = [...matchTokens].filter((t) => ACTION_VERBS.has(t));
+  if (nouns.length === 0 || verbs.length === 0) return false;
+  return verbs.every((verb) =>
+    chunkTokenSets.some(
+      (chunkTokens) =>
+        chunkTokens.has(verb) &&
+        nouns.some((noun) => chunkTokens.has(noun)),
+    ),
+  );
+}
 
 export function verifyDraft(
   draft: Draft,
@@ -165,20 +232,18 @@ export function verifyDraft(
   const successfulTools = new Set(
     toolCalls.filter((tc) => tc.outcome === "ok").map((tc) => tc.tool),
   );
+  // Token sets of the retrieved chunks, computed once: the attestation
+  // check is a set-membership test per match, not a substring scan.
+  const chunkTokenSets = chunks.map((c) => new Set(tokenize(c.content)));
   for (const { pattern, tool, label } of ACTION_CLAIMS) {
     // Check every match, not just the first: a policy restatement early in
     // the answer must not mask a genuine action claim later in it.
     const globalPattern = new RegExp(pattern.source, "gi");
     let flagged = false;
     for (const m of draft.answerText.matchAll(globalPattern)) {
-      // Verbatim in a retrieved chunk → restatement of policy, not an
-      // action claim. (normalize = lowercase + collapse whitespace, same
-      // as the quote-substring assert.)
-      const matchedText = normalize(m[0]);
-      const restatesPolicy = chunks.some((c) =>
-        normalize(c.content).includes(matchedText),
-      );
-      if (restatesPolicy) continue;
+      // (noun, verb) attested in a retrieved chunk → restatement of
+      // policy, not a claim that an action was taken.
+      if (restatesPolicy(m[0], chunkTokenSets)) continue;
       if (tool === null || !successfulTools.has(tool)) {
         flagged = true;
         break;
