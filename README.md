@@ -57,7 +57,7 @@ Voice ──WebRTC──▶ OpenAI Realtime (TRANSPORT ONLY: transcribe + speak,
 | Voice transcript route (same graph, dedup on `(session_id, item_id)`) | ✅ |
 | UI: chat shell, observability drawer, voice shell | ✅ |
 | Unit tests (88), calibration eval, RLS negative tests | ✅ |
-| **Voice mint (`/api/voice/session`)** | 🟡 503 stub — needs the OpenAI key + Day 1 spike (Realtime model version unpinned) |
+| **Voice mint (`/api/voice/session`)** | ✅ GA mint via POST `/v1/realtime/client_secrets`, model **pinned `gpt-realtime-2.1`** (verified live 2026-11-25; `gpt-4o-realtime-preview` does not exist on this key, beta `/v1/realtime/sessions` is retired) — WebRTC client in `lib/voice/realtime-client.ts`, SDP via POST `/v1/realtime/calls` |
 | **Real embeddings + real chat model** | 🟡 Env-configured client ready; needs the OpenAI key (account exists, no credit yet) |
 | **Supabase project + applied migrations + ingested corpus** | 🟡 Not created yet |
 | **Threshold calibration** | 🟡 Provisional (0.30 / 0.40 / 0.55); `npm run eval` refuses to set them from mock similarities — re-run with real embeddings |
@@ -88,7 +88,7 @@ Voice ──WebRTC──▶ OpenAI Realtime (TRANSPORT ONLY: transcribe + speak,
 | Variable | Purpose |
 |---|---|
 | `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID` | Chat model provider (OpenAI-compatible). Defaults: `https://api.openai.com/v1` / — / `gpt-4o-mini` |
-| `OPENAI_API_KEY` | Fallback for `MODEL_API_KEY`; also used for embeddings + Realtime minting when they land |
+| `OPENAI_API_KEY` | Fallback for `MODEL_API_KEY`; also used for embeddings + Realtime minting |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Server-only.** All DB access goes through server routes with this key |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Present for completeness — the app does **not** use it (RLS denies anon everything) |

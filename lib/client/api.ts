@@ -41,8 +41,16 @@ export async function postVoiceTranscript(
   return (await res.json()) as VoiceTranscriptResult;
 }
 
-/** Mint a Realtime session. 503 until the voice spike lands (see the route). */
-export async function mintVoiceSession(): Promise<{ ephemeralKey: string }> {
+/** Mint a Realtime session — returns the ephemeral client secret (`ek_…`)
+ *  plus the pinned model for the WebRTC SDP exchange. */
+export interface MintedVoiceSession {
+  ephemeralKey: string;
+  model: string;
+  expiresAt: number | null;
+  sessionId: string | null;
+}
+
+export async function mintVoiceSession(): Promise<MintedVoiceSession> {
   const res = await fetch("/api/voice/session", { method: "POST" });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as {
@@ -57,5 +65,5 @@ export async function mintVoiceSession(): Promise<{ ephemeralKey: string }> {
     err.status = res.status;
     throw err;
   }
-  return (await res.json()) as { ephemeralKey: string };
+  return (await res.json()) as MintedVoiceSession;
 }
